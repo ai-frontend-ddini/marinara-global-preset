@@ -1,0 +1,22 @@
+/* Global Preset: 📌 버튼만 페이지에 있고, 나머지 스타일은 extension.js 안(shadow DOM)에 있어요. */
+.gp-fab {
+  position: fixed;
+  right: 16px;
+  bottom: 88px;
+  z-index: 2147482000;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
+  background: var(--card, #18181b);
+  color: var(--foreground, #f4f4f5);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  opacity: 0.85;
+}
+.gp-fab:hover { opacity: 1; }
+.gp-fab-warn { border-color: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.35); }
