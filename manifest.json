@@ -3,8 +3,8 @@
   "version": 1,
   "config": {
     "name": "Global Preset",
-    "version": "2.9.4",
-    "description": "프리셋이 삭제된 채팅방을 같은 이름 계열의 새 버전으로 자동 교체하고, 프리셋이 없는 방에는 글로벌 프리셋을 넣어줍니다. 📌 패널에서 모든 방의 프리셋을 한눈에 보고 한 번에 바꿀 수 있어요.",
+    "version": "2.11.0",
+    "description": "프리셋이 삭제된 채팅방을 같은 이름 계열의 새 버전으로 자동 교체하고, 프리셋이 없는 방에는 글로벌 프리셋을 넣어줍니다. Preset 패널에서 모든 방의 프리셋을 한눈에 보고 한 번에 바꿀 수 있어요.",
     "runtime": "client",
     "capabilities": [
       "full_page_access"

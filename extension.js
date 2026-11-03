@@ -22,24 +22,30 @@ const GP_CSS = `
 
 .gp-fab {
   position: fixed;
-  right: 16px;
+  right: 0;
   bottom: 88px;
   z-index: 2147482000;
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  border: 1px solid var(--gp-border);
-  background: var(--gp-card);
-  color: var(--gp-fg);
-  font-size: 18px;
-  line-height: 1;
+  width: 58px;
+  height: 24px;
+  padding: 0 6px 0 14px;
+  border: 0;
+  border-radius: 0;
+  /* 왼쪽 끝을 V자로 파낸 리본 모양 (∑처럼) */
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 8px 50%);
+  background: #1e3a6e;
+  color: #e8eefc;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 24px;
+  text-align: center;
   cursor: pointer;
   touch-action: none;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  opacity: 0.85;
+  opacity: 0.9;
 }
 .gp-fab:hover { opacity: 1; }
-.gp-fab-warn { border-color: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.35); }
+/* 글로벌 프리셋이 없을 때: 리본을 빨갛게 */
+.gp-fab-warn { background: #9f1d1d; }
 
 .gp-panel {
   position: fixed;
@@ -319,6 +325,9 @@ const state = {
   // 새로 만든 방: 설정(마법사/연결 프리셋)을 마칠 때까지 글로벌을 넣지 않고 기다렸다가 물어봄
   newRooms: Array.isArray(saved.newRooms) ? saved.newRooms.filter((x) => typeof x === "string") : [],
   handledNew: Array.isArray(saved.handledNew) ? saved.handledNew.filter((x) => typeof x === "string") : [],
+  // 방별 토글 기억: { chatId: { fam, p, s: {섹션이름: 켜짐}, g: {그룹이름: 켜짐}, t } }
+  roomTogglesOn: saved.roomTogglesOn === true,
+  roomToggles: saved.roomToggles && typeof saved.roomToggles === "object" ? saved.roomToggles : {},
   schema: 2,
 };
 // v1(고정 기능 버전)에서 넘어온 경우: 고정 안 된 방 중 글로벌을 쓰던 방을 "글로벌 따르는 방"으로 옮김
@@ -345,6 +354,8 @@ const flushPersist = async () => {
       history: state.history,
       newRooms: state.newRooms,
       handledNew: state.handledNew,
+      roomTogglesOn: state.roomTogglesOn,
+      roomToggles: state.roomToggles,
       schema: 2,
       pins: null,
     });
@@ -632,6 +643,41 @@ function isFreshRoom(chat) {
   const created = Date.parse(chat.createdAt ?? "");
   return Number.isFinite(created) && Date.now() - created < NEW_ROOM_WINDOW_MS;
 }
+// ───────── 분기(branch) 방 ─────────
+// 마리나라에서 분기를 만들면 새 방이 생기는데, 확장 입장에선 처음 보는 방이라
+// "새 방"으로 취급돼서 글로벌 따르기·방별 토글 등을 못 이어받았음 → 원래 방 설정을 그대로 물려받음
+const branchParentId = (chat) => {
+  const meta = parseJson(chat?.metadata, {}) ?? {};
+  return typeof meta.branchParentChatId === "string" ? meta.branchParentChatId : null;
+};
+async function findBranchSource(chat) {
+  if (!chat?.groupId && !branchParentId(chat)) return null;
+  const pick = () => {
+    const parent = branchParentId(chat);
+    if (parent && parent !== chat.id && chatCache.has(parent)) return chatCache.get(parent);
+    if (!chat.groupId) return null;
+    const sibs = [...chatCache.values()].filter((c) => c.id !== chat.id && c.groupId === chat.groupId);
+    sibs.sort(
+      (a, b) =>
+        (b.promptPresetId === chat.promptPresetId) - (a.promptPresetId === chat.promptPresetId) ||
+        (Date.parse(b.updatedAt ?? "") || 0) - (Date.parse(a.updatedAt ?? "") || 0),
+    );
+    return sibs[0] ?? null;
+  };
+  // 원래 방은 분기할 때 groupId가 새로 붙을 수 있어서, 못 찾으면 목록을 한 번만 새로 받음
+  return pick() ?? (await refreshChats({ force: true }), pick());
+}
+function inheritBranch(chat, src) {
+  if (globalRooms.has(src.id)) globalRooms.add(chat.id);
+  if (noneRooms.has(src.id)) noneRooms.add(chat.id);
+  const rec = state.roomToggles[src.id];
+  if (rec && !state.roomToggles[chat.id]) state.roomToggles[chat.id] = JSON.parse(JSON.stringify(rec));
+  const pending = state.pendingChoices[src.id];
+  if (pending && pending === chat.promptPresetId && !state.pendingChoices[chat.id]) state.pendingChoices[chat.id] = pending;
+  markNewHandled(chat.id); // 새 방 질문은 건너뜀
+  marinara.log.info("분기 방: 원래 방 설정을 이어받음", chat.id, "←", src.id);
+}
+
 function markNewHandled(chatId) {
   state.newRooms = state.newRooms.filter((id) => id !== chatId);
   if (!state.handledNew.includes(chatId)) state.handledNew.push(chatId);
@@ -684,6 +730,7 @@ async function syncAll({ quiet = false } = {}) {
     const chats = await refreshChats();
     for (const id of [...globalRooms]) if (!chatCache.has(id)) globalRooms.delete(id);
     for (const id of [...noneRooms]) if (!chatCache.has(id)) noneRooms.delete(id);
+    for (const id of Object.keys(state.roomToggles)) if (!chatCache.has(id)) delete state.roomToggles[id];
     state.newRooms = state.newRooms.filter((id) => {
       const c = chatCache.get(id);
       if (!c) return false;
@@ -769,6 +816,7 @@ async function checkActiveChat() {
   }
   if (activeId === currentChatId) return;
   currentChatId = activeId;
+  await leaveToggleRoom(activeId);
   // 다른 방의 옵션 창이 떠 있으면 닫음 (그 방은 다음에 들어갈 때 다시 물어봄)
   if (choicesModal && choicesModal.chatId !== activeId) choicesModal.close();
   if (!activeId) return renderPanel();
@@ -783,6 +831,11 @@ async function checkActiveChat() {
   const chat = await getChat(activeId);
   if (!chat || currentChatId !== activeId) return;
   chatCache.set(chat.id, chat);
+  if (isFreshRoom(chat) && !state.handledNew.includes(chat.id)) {
+    const src = await findBranchSource(chat);
+    if (currentChatId !== activeId) return;
+    if (src) inheritBranch(chat, src);
+  }
   if (isFreshRoom(chat)) {
     // 새 방: 지금은 아무것도 안 넣고, 생성 마법사/설정창을 닫은 뒤 물어봄
     if (!isPendingNew(chat.id)) {
@@ -801,6 +854,7 @@ async function checkActiveChat() {
   else if (filled) toast(before ? "삭제된 프리셋 대신 글로벌 프리셋을 넣었어요" : "프리셋이 없어서 글로벌 프리셋을 넣었어요");
   await persist();
   renderPanel();
+  await roomTogglesEnter(chat).catch((error) => marinara.log.warn("방별 토글 적용 실패", error));
   await maybeAskChoices(chat);
 }
 
@@ -871,6 +925,13 @@ async function checkNewRoomWatch() {
 }
 
 async function askNewRoom(chatId) {
+  await askNewRoomInner(chatId);
+  // 새 방도 지금 토글 상태를 이 방 상태로 기억해 둠 (모달이 떠 있어도 토글만 기록)
+  const chat = chatCache.get(chatId);
+  if (chat && currentChatId === chatId) await roomTogglesEnter(chat).catch((error) => marinara.log.warn(error));
+}
+
+async function askNewRoomInner(chatId) {
   await writeChain;
   const chat = await getChat(chatId);
   if (!chat || currentChatId !== chatId) return;
@@ -921,12 +982,181 @@ async function askNewRoom(chatId) {
           noneRooms.delete(chat.id);
           await persist();
           renderPanel();
+          await roomTogglesEnter(chat).catch((error) => marinara.log.warn("방별 토글 적용 실패", error));
           marinara.setTimeout(() => askCurrentIfPending().catch((e) => marinara.log.warn(e)), 400);
         },
       },
     ],
   });
 }
+
+// ───────── 방별 토글 기억 ─────────
+// 마리나라는 섹션/그룹 켜기·끄기를 "프리셋"에 저장해서 같은 프리셋을 쓰는 방이 토글을 공유함.
+// 켜두면: 방마다 마지막으로 쓰던 토글 상태를 기억했다가, 그 방에 들어갈 때 프리셋 토글을 그 상태로 바꿈.
+// 섹션 이름으로 기억해서, 같은 계열의 새 버전 프리셋으로 바뀌어도 이어짐.
+const readFlag = (v) => v === true || v === "true" || v === 1 || v === "1";
+let toggleCtx = null; // { chatId, presetId } 지금 프리셋 토글이 어느 방의 상태인지
+let togglesBusy = false;
+let toggleSnapTimer = null;
+
+function keyedToggles(items) {
+  const seen = new Map();
+  return items.map((it) => {
+    const base = String(it.name ?? it.identifier ?? it.id).trim().slice(0, 120) || String(it.id);
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return { key: n > 1 ? `${base}#${n}` : base, id: it.id, enabled: readFlag(it.enabled) };
+  });
+}
+
+async function readToggles(presetId) {
+  const full = await api(`/prompts/${encodeURIComponent(presetId)}/full`);
+  if (!full?.preset) return null;
+  return {
+    stock: !!full.preset.systemKey, // 기본 내장 프리셋은 마리나라가 수정을 막음
+    fam: familyKey(full.preset.name),
+    sections: keyedToggles(Array.isArray(full.sections) ? full.sections : []),
+    groups: keyedToggles(Array.isArray(full.groups) ? full.groups : []),
+  };
+}
+
+const togglesOf = (live) => ({
+  s: Object.fromEntries(live.sections.map((x) => [x.key, x.enabled])),
+  g: Object.fromEntries(live.groups.map((x) => [x.key, x.enabled])),
+});
+
+function saveRoomToggles(chatId, presetId, live, keepFrom = null) {
+  const now = togglesOf(live);
+  if (keepFrom) {
+    // 기록에 있던 값은 유지하고, 새로 생긴 섹션만 지금 상태로 채움
+    for (const k of Object.keys(now.s)) if (k in (keepFrom.s ?? {})) now.s[k] = keepFrom.s[k];
+    for (const k of Object.keys(now.g)) if (k in (keepFrom.g ?? {})) now.g[k] = keepFrom.g[k];
+  }
+  state.roomToggles[chatId] = { fam: live.fam, p: presetId, ...now, t: Date.now() };
+  persist();
+}
+
+async function effectivePresetId(chat) {
+  const conn = await connectionPresetOf(chat); // 롤플레이에서 연결 프리셋이 있으면 그게 실제로 쓰임
+  if (conn) return conn;
+  return hasValidPreset(chat) ? chat.promptPresetId : null;
+}
+
+function refreshMarinaraPreset(presetId) {
+  const client = findQueryClient();
+  if (!client) return;
+  try {
+    for (const k of ["full", "sections", "groups", "detail"]) client.invalidateQueries({ queryKey: ["presets", k, presetId] });
+  } catch (error) {
+    marinara.log.debug?.("프리셋 화면 새로고침 실패", error);
+  }
+}
+
+async function roomTogglesEnter(chat) {
+  if (!state.roomTogglesOn || !chat || !isManagedMode(chat)) {
+    toggleCtx = null;
+    return;
+  }
+  togglesBusy = true;
+  try {
+    const presetId = await effectivePresetId(chat);
+    if (!presetId || currentChatId !== chat.id) {
+      toggleCtx = null;
+      return;
+    }
+    const live = await readToggles(presetId);
+    if (!live || live.stock || currentChatId !== chat.id) {
+      toggleCtx = null;
+      return;
+    }
+    // (직전 방 저장은 방을 옮기는 순간 leaveToggleRoom에서 함)
+    toggleCtx = { chatId: chat.id, presetId };
+    const rec = state.roomToggles[chat.id];
+    if (!rec || rec.fam !== live.fam) {
+      saveRoomToggles(chat.id, presetId, live); // 처음 온 방 / 다른 계열 프리셋 → 지금 상태를 이 방 상태로
+      return;
+    }
+    const jobs = [];
+    for (const x of live.sections) if (x.key in (rec.s ?? {}) && rec.s[x.key] !== x.enabled) jobs.push(["sections", x.id, rec.s[x.key]]);
+    for (const x of live.groups) if (x.key in (rec.g ?? {}) && rec.g[x.key] !== x.enabled) jobs.push(["groups", x.id, rec.g[x.key]]);
+    let done = 0;
+    for (const [kind, id, enabled] of jobs) {
+      try {
+        await api(`/prompts/${encodeURIComponent(presetId)}/${kind}/${encodeURIComponent(id)}`, { method: "PATCH", body: { enabled } });
+        done += 1;
+      } catch (error) {
+        marinara.log.warn("토글 변경 실패", kind, id, error);
+      }
+    }
+    saveRoomToggles(chat.id, presetId, live, rec);
+    if (done) {
+      refreshMarinaraPreset(presetId);
+      toast(`이 방에서 쓰던 토글로 맞췄어요 (${done}개)`);
+    }
+  } finally {
+    togglesBusy = false;
+  }
+}
+
+// 방을 옮기는 순간 호출. 직전 방에서 바꾼 토글이 아직 저장 대기 중이면 바로 저장하고,
+// 이후 새 방에서 바꾸는 토글이 직전 방에 잘못 저장되지 않게 연결을 끊음
+async function leaveToggleRoom(nextChatId) {
+  const prev = toggleCtx;
+  if (!prev || prev.chatId === nextChatId) return;
+  toggleCtx = null;
+  if (!toggleSnapTimer) return;
+  marinara.clearTimeout(toggleSnapTimer);
+  toggleSnapTimer = null;
+  try {
+    const live = await readToggles(prev.presetId);
+    if (live && !live.stock) saveRoomToggles(prev.chatId, prev.presetId, live);
+  } catch (error) {
+    marinara.log.warn("토글 기억 실패", error);
+  }
+}
+
+// 방 안에서 토글을 바꾸면 그 방 상태로 기억 (마리나라의 토글 저장 요청을 보고 한 번만 읽음, 계속 확인하지 않음)
+function scheduleToggleSnapshot() {
+  if (!state.roomTogglesOn) return;
+  if (toggleSnapTimer) marinara.clearTimeout(toggleSnapTimer);
+  toggleSnapTimer = marinara.setTimeout(async () => {
+    toggleSnapTimer = null;
+    if (togglesBusy) return scheduleToggleSnapshot();
+    const ctx = toggleCtx;
+    if (!ctx || ctx.chatId !== currentChatId) return;
+    try {
+      const live = await readToggles(ctx.presetId);
+      if (live && !live.stock && toggleCtx === ctx) saveRoomToggles(ctx.chatId, ctx.presetId, live);
+    } catch (error) {
+      marinara.log.warn("토글 기억 실패", error);
+    }
+  }, 1500);
+}
+
+const TOGGLE_REQUEST = /\/api\/prompts\/[^/?#]+\/(?:sections|groups)\/[^/?#]+/;
+const originalFetch = window.fetch;
+const watchedFetch = function (input, init) {
+  const result = originalFetch.apply(this, arguments);
+  try {
+    const url = typeof input === "string" ? input : input?.url ?? "";
+    const method = String(init?.method ?? input?.method ?? "GET").toUpperCase();
+    if (method === "PATCH" && !togglesBusy && TOGGLE_REQUEST.test(url)) {
+      result.then(
+        (res) => {
+          if (res?.ok) scheduleToggleSnapshot();
+        },
+        () => {},
+      );
+    }
+  } catch {
+    /* 관찰만 하고 요청에는 손대지 않음 */
+  }
+  return result;
+};
+window.fetch = watchedFetch;
+marinara.onCleanup(() => {
+  if (window.fetch === watchedFetch) window.fetch = originalFetch;
+});
 
 // ───────── UI 공통 ─────────
 // 확장 UI 전체를 닫힌(closed) shadow DOM 안에 둠.
@@ -1202,7 +1432,7 @@ async function showSetupModal() {
           state.setupDone = true;
           await persist();
           await syncAll();
-          toast("설정 완료! 📌 버튼에서 언제든 바꿀 수 있어요");
+          toast("설정 완료! 오른쪽 Preset 리본에서 언제든 바꿀 수 있어요");
         },
       },
     ],
@@ -1370,25 +1600,29 @@ function showChoicesModal(chat, presetId, full, variables) {
 
 // 지금 보고 있는 방이 방금 바뀌었으면 바로 옵션 창
 async function askCurrentIfPending() {
-  if (!currentChatId || !state.pendingChoices[currentChatId]) return;
+  if (!currentChatId) return;
+  const needChoices = !!state.pendingChoices[currentChatId];
+  if (!needChoices && !state.roomTogglesOn) return;
   const chat = await getChat(currentChatId);
-  if (chat) await maybeAskChoices(chat);
+  if (!chat) return;
+  await roomTogglesEnter(chat).catch((error) => marinara.log.warn("방별 토글 적용 실패", error));
+  if (needChoices) await maybeAskChoices(chat);
 }
 
 // ───────── 플로팅 버튼 + 패널 ─────────
 // 📌 버튼은 일부러 shadow DOM 밖(페이지)에 둠 → 버튼 모으기 같은 다른 확장이 가져갈 수 있게.
 // 패널/옵션 창/알림은 shadow DOM 안에 그대로.
-const fab = el("button", { type: "button", class: "gp-fab", title: "Global Preset", "aria-label": "Global Preset", text: "📌" });
+const fab = el("button", { type: "button", class: "gp-fab", title: "Global Preset", "aria-label": "Global Preset", text: "Preset" });
 const panel = el("div", { class: "gp-panel", hidden: true });
 document.body.appendChild(fab);
 marinara.onCleanup(() => fab.remove());
 root.append(panel);
 
 function placeFab() {
+  // 오른쪽 끝에 붙어 있고, 위아래로만 옮길 수 있음
   if (state.btnPos) {
-    const x = Math.min(Math.max(4, state.btnPos.x), window.innerWidth - 48);
-    const y = Math.min(Math.max(4, state.btnPos.y), window.innerHeight - 48);
-    Object.assign(fab.style, { left: `${x}px`, top: `${y}px`, right: "auto", bottom: "auto" });
+    const y = Math.min(Math.max(4, state.btnPos.y), window.innerHeight - 28);
+    Object.assign(fab.style, { top: `${y}px`, bottom: "auto" });
   }
 }
 placeFab();
@@ -1408,7 +1642,7 @@ fab.addEventListener("pointermove", (e) => {
   const dy = e.clientY - drag.sy;
   if (!drag.moved && Math.hypot(dx, dy) < 5) return;
   drag.moved = true;
-  state.btnPos = { x: drag.ox + dx, y: drag.oy + dy };
+  state.btnPos = { y: drag.oy + dy };
   placeFab();
 });
 let lastPointerToggle = 0;
@@ -1565,6 +1799,7 @@ function roomRow(chat, { tabKey, onToggle }) {
       check,
       el("span", { class: "gp-room-title", title: chatName(chat), text: chatName(chat) }),
       isCurrent ? el("span", { class: "gp-tag gp-tag-current", text: "현재 방" }) : null,
+      chat.groupId && branchParentId(chat) ? el("span", { class: "gp-tag", title: "분기한 방", text: "분기" }) : null,
       isPendingNew(chat.id) ? el("span", { class: "gp-tag", title: "설정을 마친 뒤 글로벌 적용 여부를 물어봐요", text: "🆕 새 방" }) : null,
       tabKey === "bypreset" && following ? el("span", { class: "gp-tag gp-tag-global", title: "글로벌을 따르는 방", text: "🌐 글로벌" }) : null,
       state.modes.length > 1 ? el("span", { class: "gp-tag", text: MODE_LABELS[chat.mode] ?? chat.mode }) : null,
@@ -1785,6 +2020,7 @@ function renderPanel() {
     state.modes,
     [...globalRooms].sort(),
     [...noneRooms].sort(),
+    state.roomTogglesOn,
     state.history.length,
     state.history.at(-1)?.t ?? 0,
     presets.map((p) => [p.id, p.name]),
@@ -1863,6 +2099,26 @@ function renderPanel() {
       })(),
       el("div", { class: "gp-label", text: "적용할 모드" }),
       el("div", { class: "gp-row" }, modes.map((m) => m.node)),
+      el("div", { class: "gp-label", text: "방별 토글" }),
+      (() => {
+        const box = el("input", { type: "checkbox", checked: state.roomTogglesOn });
+        box.addEventListener("change", async () => {
+          state.roomTogglesOn = box.checked;
+          toggleCtx = null;
+          await persist();
+          if (box.checked) {
+            await askCurrentIfPending().catch((error) => marinara.log.warn(error));
+            toast("방별 토글을 켰어요. 지금 방의 토글부터 기억해요");
+          } else {
+            toast("방별 토글을 껐어요. 토글이 다시 프리셋 하나로 공유돼요");
+          }
+        });
+        return el("label", { class: "gp-check" }, [box, " 같은 프리셋이라도 방마다 토글을 따로 기억"]);
+      })(),
+      el("p", {
+        class: "gp-muted",
+        text: "방에 들어가면 그 방에서 쓰던 토글(섹션 켜기/끄기)로 프리셋이 바뀌어요. 두 방에서 동시에 생성하면 토글이 섞일 수 있어요.",
+      }),
     ];
   } else {
     content = [

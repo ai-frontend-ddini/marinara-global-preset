@@ -1,22 +1,27 @@
-/* Global Preset: 📌 버튼만 페이지에 있고, 나머지 스타일은 extension.js 안(shadow DOM)에 있어요. */
+/* Global Preset: Preset 리본 버튼만 페이지에 있고, 나머지 스타일은 extension.js 안(shadow DOM)에 있어요. */
 .gp-fab {
   position: fixed;
-  right: 16px;
+  right: 0;
   bottom: 88px;
   z-index: 2147482000;
-  width: 40px;
-  height: 40px;
-  padding: 0;
-  border-radius: 50%;
-  border: 1px solid var(--border, rgba(127, 127, 127, 0.35));
-  background: var(--card, #18181b);
-  color: var(--foreground, #f4f4f5);
-  font-size: 18px;
-  line-height: 1;
+  width: 58px;
+  height: 24px;
+  padding: 0 6px 0 14px;
+  border: 0;
+  border-radius: 0;
+  /* 왼쪽 끝을 V자로 파낸 리본 모양 (∑처럼) */
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 8px 50%);
+  background: #1e3a6e;
+  color: #e8eefc;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 24px;
+  text-align: center;
   cursor: pointer;
   touch-action: none;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  opacity: 0.85;
+  opacity: 0.9;
 }
 .gp-fab:hover { opacity: 1; }
-.gp-fab-warn { border-color: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.35); }
+/* 글로벌 프리셋이 없을 때: 리본을 빨갛게 */
+.gp-fab-warn { background: #9f1d1d; }
